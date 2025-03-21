@@ -1,0 +1,63 @@
+---
+title: "Final Project"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## EDA- dataset was taken from here <https://www.kaggle.com/datasets/junsoopablo/korean-genome-and-epidemiology-study-koges?select=follow_02_data.csv>
+
+```{r}
+dataset <- read.csv('follow_02_data.csv')
+```
+
+```{r}
+# Define the new column names
+ncol(dataset)
+new_colnames <- c("Personal_ID", "Unit_Data_Class", "Survey_Date", "Age", "Marital_Status", 
+  "Alcohol_Drinking_Status", "Total_Drinking_Frequency", "Total_Drinking_Amount", 
+  "Rice_Wine_Drinking_Frequency", "Rice_Wine_Drinking_Amount", "Wine_Drinking_Frequency", 
+  "Wine_Drinking_Amount", "Soju_Drinking_Frequency", "Soju_Drinking_Amount", 
+  "Beer_Drinking_Frequency", "Beer_Drinking_Amount", "High_Liquor_Drinking_Frequency", 
+  "High_Liquor_Drinking_Amount", "Smoking_Status", "Smoking_Duration", 
+  "Smoking_Amount_Per_Day", "Passive_Smoking_Exposure", "Exercise_Frequency", 
+  "Hypertension_Diagnosis", "Age_Diagnosed_Hypertension", "Diabetes_Diagnosis", 
+  "Age_Diagnosed_Diabetes", "Hyperlipidemia_Diagnosis", "Age_Diagnosed_Hyperlipidemia", 
+  "Family_History_Hypertension_Father", "Age_Father_Diagnosed_Hypertension", 
+  "Family_History_Hypertension_Mother", "Age_Mother_Diagnosed_Hypertension", 
+  "Family_History_Diabetes_Father", "Age_Father_Diagnosed_Diabetes", 
+  "Family_History_Diabetes_Mother", "Age_Mother_Diagnosed_Diabetes", 
+  "Pregnancy_Experience", "Age_First_Pregnancy", "Height_cm", "Weight_kg", 
+  "Waist_Circumference_cm", "Hip_Circumference_cm", "Pulse_Rate", 
+  "Systolic_Blood_Pressure", "Diastolic_Blood_Pressure", "HbA1C", 
+  "Fasting_Glucose", "Creatinine_Level", "AST", "ALT", "Total_Cholesterol", 
+  "HDL_Cholesterol", "Triglycerides", "Fasting_Insulin")
+
+# Rename columns in the dataset
+colnames(dataset) <- new_colnames
+
+```
+
+```{r}
+#[Code 66666: Not surveyed; 77777: Not applicable; 99999: Unknown/Not answered/Not measured]
+head(dataset)
+```
+
+```{r}
+library(ggplot2)
+library(ggcorrplot)
+
+subset_dataset <- dataset[c("Diabetes_Diagnosis", "Weight_kg", 
+                            "Total_Cholesterol", "HbA1C", 
+                            "Fasting_Glucose", "Creatinine_Level")]
+
+corr <- round(cor(subset_dataset), 1)
+ggcorrplot(corr,hc.order = TRUE,
+type = "lower",
+outline.color = "white",
+ggtheme = ggplot2::theme_void(),
+colors = c("#6D9EC1", "white", "#E46726"),
+lab = TRUE)
+```
