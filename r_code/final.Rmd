@@ -86,3 +86,63 @@ head(results)
 
 
 ```
+
+```{r}
+# 4. Propensity score in regularized causal model
+# not sure where to go from here
+library(MASS)
+
+lambda <- c(0.8, -0.3, 0.5, -0.4)  # Selection model coefficients
+beta <- abs(c(1, 2, 1.5, 0.5))  # beta memb [0, infinity) 
+tau <- 2 
+
+nu <- rnorm(n, mean = 0, sd = 1)  # N(0,1)
+
+#Z = gama^T X + nu
+X <- as.matrix(X)
+
+Z <- X %*% lambda + nu  
+Z <- ifelse(Z > 0, 1, 0)  
+X <- as.matrix(X)
+
+# Compute observed outcome Y = tauZ + beta^T X + eps
+Y <- tau * Z + X %*% beta + eps  
+
+# Store data in dataframe
+data <- data.frame(Y, Z, X)
+```
+
+```{r}
+# recreating example 1 of selecting RIC
+set.seed(42)
+n <- 250 
+d <- 2  
+
+
+X1 <- runif(n, 0, 1)
+X2 <- runif(n, 0, 1)
+
+mu_X <- X1 - X2
+
+propensity <- 0.8 * (mu_X / (0.1 * (2 - X1 - X2) + 0.25)) + 0.025 * (X1 + X2) + 0.05
+propensity <- pmax(0, pmin(1, propensity))
+
+Z <- rbinom(n, 1, propensity)
+
+eps <- rnorm(n, mean = 0, sd = 1)
+
+tau <- 1
+Y <- mu_X - tau * Z + eps
+data <- data.frame(Y, Z, X1, X2, mu_X, propensity)
+head(data)
+
+```
+
+```{r}
+# should be between -2 and 3 an y same as figure 4
+ggplot(data, aes(x =propensity , y = mu_X)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", color = "blue") +
+  labs(title = "Targeted Selection: π(X) vs μ(X)", x = "pi", y = "mu")
+
+```
