@@ -351,3 +351,103 @@ X$tau_hat_bcf <- tau_hat
 head(X[, c("tau_heterogeneous", "tau_hat_bcf")])
 
 ```
+
+```{r}
+
+set.seed(42)
+
+num_rep = 50 
+sample_sizes = c(250) 
+ncov = c(5) 
+tau_str = c('heterogeneous', 'homogeneous')  
+mu_str = c('linear', 'nonlinear')  
+
+
+consolidated_results = NULL  
+
+
+for (s in sample_sizes){
+  for (k in ncov){
+    for (m in mu_str){
+      for (t in tau_str){
+        for (i in 1:num_rep){
+
+          n <- s
+          
+          X1 <- rnorm(n, 0, 1)
+          X2 <- rnorm(n, 0, 1)
+          X3 <- rnorm(n, 0, 1)
+          X4 <- rbinom(n, 1, 0.5) 
+
+          X <- data.frame(X1, X2, X3, X4)
+          # tau(x) = 3 if homog, 1+2x_2 x_5 heterog
+          tau <- ifelse(t == 'homogeneous', rep(3, n), 1 + 2 * X$X2 * X$X4)
+
+          g_X4 <- ifelse(X$X4 == 1, 2, -1)
+          
+          # mu(x) 1+g(x4) +x1x3 lin
+          # mu(x) = -6+g(x4) + 6|x3-1|
+          mu <- ifelse(m == 'linear', 
+                       1 + g_X4 + X$X1 * X$X3, 
+                       -6 + g_X4 + 6 * abs(X$X3 - 1))
+
+          s_mu <- sd(mu)
+          if (is.na(s_mu) || s_mu == 0) s_mu <- 1
+          
+          u <- runif(n, 0, 1)
+          
+          # pi(xi) = 0.8 phi (3mu(xi)/s-0.5x1)+0.05 + ui/10
+          propensity <- pnorm(0.8 * ((3 * mu / s_mu) - 0.5 * X$X1) + 0.05 + u / 10)
+          propensity <- pmax(0, pmin(1, propensity))  
+
+          Z <- rbinom(n, 1, propensity)
+
+          eps <- rnorm(n, 0, 1)
+          Y <- mu + tau * Z + eps
+
+          data <- data.frame(Y, Z, X, propensity, tau)
+
+          if (any(is.na(data))) {next}
+
+          X_covariates <- as.matrix(X)  
+          y <- data$Y
+          z <- data$Z
+          pihat <- data$propensity
+
+          if (any(is.na(pihat))) {next}
+
+
+          j <- 0
+          fit.bcf <- NULL
+          class(fit.bcf) <- NULL
+
+          while(j <= 3 & any(class(fit.bcf) %in% c('error', 'NULL'))) {
+            fit.bcf <- tryCatch({
+              bcf(y, z, X_covariates, X_covariates, pihat, nburn = 1000, nsim = 2000)
+            }, error = function(e) e)
+            j <- j + 1
+          }
+
+          if (!class(fit.bcf)[1] %in% c('simpleError', 'Rcpp::exception')){
+            if (!is.null(fit.bcf$tau) && !any(is.na(fit.bcf$tau))) {
+              tau_hat_bcf <- colMeans(fit.bcf$tau)
+              rmse_ate_bcf <- sqrt(mean((tau - mean(tau_hat_bcf))^2)) 
+              rmse_cate_bcf <- sqrt(mean((tau - tau_hat_bcf)^2)) 
+
+              cat(sprintf("Rep: %d | n: %d | p: %d | tau: %s | mu: %s | RMSE ATE: %.3f | RMSE CATE: %.3f\n",
+                          i, n, k, t, m, rmse_ate_bcf, rmse_cate_bcf))
+            } else {
+              cat("Warning: fit.bcf$tau is NULL or contains NAs, skipping iteration", i, "\n")
+              next
+            }
+          } else {
+            cat("Warning: BCF model failed to fit, skipping iteration", i, "\n")
+            next
+          }
+        }
+      }
+    }
+  }
+}
+#0.978093
+```
