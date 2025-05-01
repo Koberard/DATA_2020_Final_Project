@@ -1,0 +1,368 @@
+---
+title: "Final_Bart"
+output: html_document
+date: "2025-04-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## BART Model 
+
+```{r}
+library(dbarts)
+library(dplyr)
+
+set.seed(42)
+
+# Simulation Parameters
+nburn <- 1000
+nsim <- 1000
+num_rep <- 50
+sample_sizes <- c(250, 500)
+mu_types <- c("linear", "nonlinear")
+tau_types <- c("homogeneous", "heterogeneous")
+
+results_list <- list()
+idx <- 1
+
+for (n in sample_sizes) {
+  for (mu_type in mu_types) {
+    for (tau_type in tau_types) {
+      for (rep in 1:num_rep) {
+        cat(sprintf("Rep %d | n = %d | mu = %s | tau = %s\n", rep, n, mu_type, tau_type))
+
+        tryCatch({
+          # Step 1: Generate covariates
+          X1 <- rnorm(n)
+          X2 <- rnorm(n)
+          X3 <- rnorm(n)
+          X4 <- rbinom(n, 1, 0.5)
+          X5 <- sample(c(1, 2, 3), n, replace = TRUE)
+          X <- data.frame(X1, X2, X3, X4, X5)
+
+          # Step 2: Treatment effect
+          tau <- if (tau_type == "homogeneous") rep(3, n) else 1 + 2 * X$X2 * X$X5
+
+          # Step 3: Prognostic function (fixed g_X4 logic)
+          g_X4 <- ifelse(X$X4 == 1, 2, -1)
+          mu <- if (mu_type == "linear") {
+            1 + g_X4 + X$X1 * X$X3
+          } else {
+            -6 + g_X4 + 6 * abs(X$X3 - 1)
+          }
+
+          # Step 4: Propensity and treatment assignment
+          s_mu <- sd(mu)
+          u <- runif(n)
+          pi <- 0.8 * pnorm((6 * mu / s_mu) - 0.5 * X$X1) + 0.05 + u / 10
+          pi <- pmax(0, pmin(1, pi))
+          Z <- rbinom(n, 1, pi)
+          eps <- rnorm(n)
+          Y <- mu + tau * Z + eps
+
+          # Step 5: Fit BART
+          dat <- data.frame(Y, Z, X)
+          x.train <- as.matrix(dat[, c("Z", "X1", "X2", "X3", "X4", "X5")])
+          y.train <- dat$Y
+
+          bart_fit <- bart(x.train = x.train,
+                           y.train = y.train,
+                           keeptrees = TRUE,
+                           nskip = nburn,
+                           ndpost = nsim,
+                           ntree = 200,
+                           verbose = FALSE)
+
+          # Step 6: Generate counterfactual predictions
+          newdata_control <- data.frame(Z = 0, X1 = X$X1, X2 = X$X2, X3 = X$X3, X4 = X$X4, X5 = X$X5)
+          newdata_treatment <- data.frame(Z = 1, X1 = X$X1, X2 = X$X2, X3 = X$X3, X4 = X$X4, X5 = X$X5)
+
+          pred_control <- predict(bart_fit, newdata = as.matrix(newdata_control))
+          pred_treatment <- predict(bart_fit, newdata = as.matrix(newdata_treatment))
+
+          # Step 7: Compute treatment effects
+          tau_samples <- pred_treatment - pred_control  # nsim x n
+          tau_hat <- colMeans(tau_samples)
+          ate_hat <- mean(tau_hat)
+          ate_true <- mean(tau)
+
+          rmse_ate <- sqrt((ate_hat - ate_true)^2)
+          rmse_cate <- sqrt(mean((tau_hat - tau)^2))
+
+          lower_cate <- apply(tau_samples, 2, quantile, probs = 0.025)
+          upper_cate <- apply(tau_samples, 2, quantile, probs = 0.975)
+          coverage_cate <- mean(tau >= lower_cate & tau <= upper_cate)
+          length_cate <- mean(upper_cate - lower_cate)
+
+          ate_samples <- rowMeans(tau_samples)
+          ci_ate <- quantile(ate_samples, probs = c(0.025, 0.975))
+          coverage_ate <- as.numeric(ate_true >= ci_ate[1] & ate_true <= ci_ate[2])
+          length_ate <- ci_ate[2] - ci_ate[1]
+
+          results_list[[idx]] <- data.frame(
+            rep = rep, n = n,
+            mu_type = mu_type, tau_type = tau_type,
+            rmse_ate = rmse_ate,
+            rmse_cate = rmse_cate,
+            coverage_ate = coverage_ate,
+            coverage_cate = coverage_cate,
+            length_ate = length_ate,
+            length_cate = length_cate
+          )
+          idx <- idx + 1
+
+        }, error = function(e) {
+          cat("⚠️ Error in iteration. Skipping...\n")
+        })
+      }
+    }
+  }
+}
+
+# Summarize results
+results <- do.call(rbind, results_list)
+
+summary_results <- results %>%
+  group_by(n, mu_type, tau_type) %>%
+  summarise(
+    ATE_RMSE = mean(rmse_ate),
+    ATE_Coverage = mean(coverage_ate),
+    ATE_Length = mean(length_ate),
+    CATE_RMSE = mean(rmse_cate),
+    CATE_Coverage = mean(coverage_cate),
+    CATE_Length = mean(length_cate),
+    .groups = "drop"
+  )
+
+print(summary_results)
+save(summary_results, file = "summary_results_BART.RData")
+```
+
+
+## BCF Model 
+
+```{r}
+set.seed(42)
+
+# Parameters
+nburn <- 1000
+nsim <- 1000
+num_rep <- 50
+sample_sizes <- c(250, 500)
+mu_types <- c("linear", "nonlinear")
+tau_types <- c("homogeneous", "heterogeneous")
+
+results_list <- list()
+idx <- 1
+
+for (n in sample_sizes) {
+  for (mu_type in mu_types) {
+    for (tau_type in tau_types) {
+      for (rep in 1:num_rep) {
+        cat(sprintf("Rep %d | n = %d | mu = %s | tau = %s\n", rep, n, mu_type, tau_type))
+
+        tryCatch({
+          # Step 1: Generate covariates
+          X1 <- rnorm(n)
+          X2 <- rnorm(n)
+          X3 <- rnorm(n)
+          X4 <- rbinom(n, 1, 0.5)
+          X5 <- sample(c(1,2,3), n, replace = TRUE)
+          X <- data.frame(X1, X2, X3, X4, X5)
+
+          # Step 2: Treatment effect
+          tau <- if (tau_type == "homogeneous") rep(3, n) else 1 + 2 * X$X2 * X$X5
+
+          # Step 3: Prognostic function (fixed bug in g_X4)
+          g_X4 <- ifelse(X$X4 == 1, 2, -1)
+          mu <- if (mu_type == "linear") {
+            1 + g_X4 + X$X1 * X$X3
+          } else {
+            -6 + g_X4 + 6 * abs(X$X3 - 1)
+          }
+
+          # Step 4: Propensity & treatment assignment 
+          s_mu <- sd(mu)
+          u <- runif(n)
+          pi <- 0.8 * pnorm((6 * mu / s_mu) - 0.5 * X$X1) + 0.05 + u / 10
+          pi <- pmax(0, pmin(1, pi))
+          Z <- rbinom(n, 1, pi)
+          eps <- rnorm(n)
+          Y <- mu + tau * Z + eps
+
+          # Step 5: Fit BCF
+          fit <- bcf(y = Y, z = Z,
+                     x_control = as.matrix(X),
+                     x_moderate = as.matrix(X),
+                     pihat = pi,
+                     nburn = nburn,
+                     nsim = nsim)
+
+          tau_samples <- fit$tau
+          tau_hat <- colMeans(tau_samples)
+          ate_hat <- mean(tau_hat)
+          ate_true <- mean(tau)
+
+          rmse_ate <- sqrt((ate_hat - ate_true)^2)
+          rmse_cate <- sqrt(mean((tau_hat - tau)^2))
+
+          lower_cate <- apply(tau_samples, 2, quantile, probs = 0.025)
+          upper_cate <- apply(tau_samples, 2, quantile, probs = 0.975)
+          coverage_cate <- mean(tau >= lower_cate & tau <= upper_cate)
+          length_cate <- mean(upper_cate - lower_cate)
+
+          ate_samples <- rowMeans(tau_samples)
+          ci_ate <- quantile(ate_samples, probs = c(0.025, 0.975))
+          coverage_ate <- as.numeric(ate_true >= ci_ate[1] & ate_true <= ci_ate[2])
+          length_ate <- ci_ate[2] - ci_ate[1]
+
+          results_list[[idx]] <- data.frame(
+            rep = rep, n = n,
+            mu_type = mu_type, tau_type = tau_type,
+            rmse_ate, rmse_cate,
+            coverage_ate, coverage_cate,
+            length_ate, length_cate
+          )
+          idx <- idx + 1
+
+        })
+      }
+    }
+  }
+}
+
+results <- do.call(rbind, results_list)
+
+summary_results <- results %>%
+  group_by(n, mu_type, tau_type) %>%
+  summarise(
+    ATE_RMSE = mean(rmse_ate),
+    ATE_Coverage = mean(coverage_ate),
+    ATE_Length = mean(length_ate),
+    CATE_RMSE = mean(rmse_cate),
+    CATE_Coverage = mean(coverage_cate),
+    CATE_Length = mean(length_cate),
+    .groups = "drop"
+  )
+
+print(summary_results)
+save(summary_results, file = "summary_results_BCF.RData")
+```
+
+## GLM S-Learner Model 
+
+```{r}
+set.seed(42)
+
+# Parameters
+num_rep <- 50
+sample_sizes <- c(250, 500)
+mu_types <- c("linear", "nonlinear")
+tau_types <- c("homogeneous", "heterogeneous")
+
+results_list <- list()
+idx <- 1
+
+for (n in sample_sizes) {
+  for (mu_type in mu_types) {
+    for (tau_type in tau_types) {
+      for (rep in 1:num_rep) {
+        cat(sprintf("[GLM S-Learner] Rep %d | n = %d | mu = %s | tau = %s\n", rep, n, mu_type, tau_type))
+
+        tryCatch({
+          # Step 1: Generate covariates
+          X1 <- rnorm(n)
+          X2 <- rnorm(n)
+          X3 <- rnorm(n)
+          X4 <- rbinom(n, 1, 0.5)
+          X5 <- sample(c(1,2,3), n, replace = TRUE)
+          X <- data.frame(X1, X2, X3, X4, X5)
+
+          # Step 2: Treatment effect
+          tau <- if (tau_type == "homogeneous") rep(3, n) else 1 + 2 * X$X2 * X$X5
+
+          # Step 3: Prognostic function
+          g_X4 <- ifelse(X$X4 == 1, 2, -1)
+          mu <- if (mu_type == "linear") {
+            1 + g_X4 + X$X1 * X$X3
+          } else {
+            -6 + g_X4 + 6 * abs(X$X3 - 1)
+          }
+
+          # Step 4: Propensity & treatment assignment 
+          s_mu <- sd(mu)
+          u <- runif(n)
+          pi <- 0.8 * pnorm((6 * mu / s_mu) - 0.5 * X$X1) + 0.05 + u / 10
+          pi <- pmax(0, pmin(1, pi))
+          Z <- rbinom(n, 1, pi)
+          eps <- rnorm(n)
+          Y <- mu + tau * Z + eps
+
+          # Step 5: Fit GLM S-Learner
+          training_data <- data.frame(Z = Z, X, Y = Y)
+          glm_model <- lm(Y ~ ., data = training_data)  # simple linear regression
+
+          # Step 6: Predict potential outcomes
+          X_new <- data.frame(X)
+          X_treated <- data.frame(Z = 1, X_new)
+          X_control <- data.frame(Z = 0, X_new)
+
+          Y1_hat <- predict(glm_model, newdata = X_treated)
+          Y0_hat <- predict(glm_model, newdata = X_control)
+
+          tau_hat <- Y1_hat - Y0_hat
+          ate_hat <- mean(tau_hat)
+          ate_true <- mean(tau)
+
+          # Step 7: Metrics
+          rmse_ate <- sqrt((ate_hat - ate_true)^2)
+          rmse_cate <- sqrt(mean((tau_hat - tau)^2))
+
+          # Approximate 95% credible intervals (GLM is not Bayesian, so fake intervals using repeats)
+          tau_samples_dummy <- matrix(tau_hat, nrow = 1000, ncol = n, byrow = TRUE)
+          lower_cate <- apply(tau_samples_dummy, 2, quantile, probs = 0.025)
+          upper_cate <- apply(tau_samples_dummy, 2, quantile, probs = 0.975)
+          coverage_cate <- mean(tau >= lower_cate & tau <= upper_cate)
+          length_cate <- mean(upper_cate - lower_cate)
+
+          ate_samples <- rowMeans(tau_samples_dummy)
+          ci_ate <- quantile(ate_samples, probs = c(0.025, 0.975))
+          coverage_ate <- as.numeric(ate_true >= ci_ate[1] & ate_true <= ci_ate[2])
+          length_ate <- ci_ate[2] - ci_ate[1]
+
+          results_list[[idx]] <- data.frame(
+            rep = rep, n = n,
+            mu_type = mu_type, tau_type = tau_type,
+            rmse_ate, rmse_cate,
+            coverage_ate, coverage_cate,
+            length_ate, length_cate
+          )
+          idx <- idx + 1
+
+        })
+      }
+    }
+  }
+}
+
+results <- do.call(rbind, results_list)
+
+summary_results <- results %>%
+  group_by(n, mu_type, tau_type) %>%
+  summarise(
+    ATE_RMSE = mean(rmse_ate),
+    ATE_Coverage = mean(coverage_ate),
+    ATE_Length = mean(length_ate),
+    CATE_RMSE = mean(rmse_cate),
+    CATE_Coverage = mean(coverage_cate),
+    CATE_Length = mean(length_cate),
+    .groups = "drop"
+  )
+
+print(summary_results)
+save(summary_results, file = "summary_results_GLM_SLearner.RData")
+```
+
+

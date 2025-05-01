@@ -1,0 +1,338 @@
+---
+title: "Final Project"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dbarts)
+library(bcf)
+library(grf)
+library(bayeslm)
+library(nnet)
+library(BART)
+set.seed(42)
+
+num_rep = 50
+sample_sizes = c(250)
+ncov = c(5, 50, 100, 500) 
+tau_str = c('heterogeneous', 'homogeneous')
+mu_str = c('linear', 'nonlinear')
+
+consolidated_results <- data.frame(
+  rep = integer(),
+  n = integer(),
+  p = integer(),
+  tau_type = character(),
+  mu_type = character(),
+  rmse_ate = numeric(),
+  rmse_cate = numeric(),
+  k = integer(),
+  stringsAsFactors = FALSE
+)
+
+g = function(x){
+  ifelse(x == 1, 2, ifelse(x == 2, -1, -4))
+}
+
+rmse_ate = function(tau, tau_hat){
+  sqrt((mean(tau) - mean(tau_hat))^2)
+}
+
+rmse_cate = function(tau, tau_hat){
+  sqrt(mean((tau - tau_hat)^2))
+}
+
+for (s in sample_sizes) {
+  for (k in 1:length(ncov)) {
+    for (m in mu_str) {
+      for (t in tau_str) {
+        for (i in 1:num_rep) {
+          n <- s
+          p_val <- ncov[k]
+          
+          x <- matrix(rnorm(n * p_val), nrow = n, ncol = p_val)
+          if(p_val >= 1) x[,1] <- rnorm(n)
+          if(p_val >= 2) x[,2] <- rnorm(n)
+          if(p_val >= 3) x[,3] <- rnorm(n)
+          if(p_val >= 4) x[,4] <- rbinom(n, 1, 0.5)
+          if(p_val >= 5) x[,5] <- sample(c(1,2,3), n, replace = TRUE)
+          
+          u <- runif(n, 0, 1)
+          sigma <- 5
+          
+          # tau(x) = 3 if homog, 1+2x_2 x_4 heterog
+          if (t == "homogeneous") {
+            tau <- rep(3, n)
+          } else {
+            tau <- 1 + 2 * x[,2] * x[,4]  # heterogeneous: 1 + 2*x2*x4
+          }
+          
+          # mu(x) = 1+g(x5)+x1*x3 if linear
+          # mu(x) = -6+g(x5)+6*|x3-1| if nonlinear
+          if (m == "linear") {
+            mu <- 1 + g(x[,5]) + x[,1] * x[,3]
+          } else if (m == "nonlinear") {
+            mu <- -6 + g(x[,5]) + 6 * abs(x[,3] - 1)
+          }
+          
+          # pi(x) = 0.8*pnorm((3*mu/sd(mu))-0.5*x1) + 0.05 + u/10
+          pi.x <- 0.8 * pnorm((3 * mu / sd(mu)) - 0.5 * x[,1]) + 0.05 + u / 10
+          z <- rbinom(n, 1, pi.x)
+          bart_fit <- bart(x, z, verbose = FALSE)
+          pihat <- apply(bart_fit$yhat.train, 2, mean)
+          
+          y <- mu + tau * z + rnorm(n, sd = sigma)
+          
+          x.mod <- data.frame(x, z, pihat)
+          x.train <- makeModelMatrixFromDataFrame(data.frame(rbind(x, x), 
+                                      z = c(rep(1, n), rep(0, n)), 
+                                      pihat = c(pihat, pihat)))
+          
+          test_x <- matrix(rnorm(n * p_val), nrow = n, ncol = p_val)
+          if(p_val >= 1) test_x[,1] <- rnorm(n)
+          if(p_val >= 2) test_x[,2] <- rnorm(n)
+          if(p_val >= 3) test_x[,3] <- rnorm(n)
+          if(p_val >= 4) test_x[,4] <- rbinom(n, 1, 0.5)
+          if(p_val >= 5) test_x[,5] <- sample(c(1,2,3), n, replace = TRUE)
+          u_test <- runif(n, 0, 1)
+          if (t == "homogeneous") {
+            tau_test <- rep(3, n)
+          } else {
+            tau_test <- 1 + 2 * test_x[,2] * test_x[,4]
+          }
+          if (m == "linear") {
+            mu_test <- 1 + g(test_x[,5]) + test_x[,1] * test_x[,3]
+          } else {
+            mu_test <- -6 + g(test_x[,5]) + 6 * abs(test_x[,3] - 1)
+          }
+          pi.x_test <- 0.8 * pnorm((3 * mu_test / sd(mu_test)) - 0.5 * test_x[,1]) + 0.05 + u_test/10
+          z_test <- rbinom(n, 1, pi.x_test)
+          y_test <- mu_test + tau_test * z_test + rnorm(n, sd = sigma)
+          test_data <- list(y = y_test, x = test_x, z = z_test, pihat = NULL)
+
+          j <- 0
+          fit.bcf <- NULL
+          class(fit.bcf) <- NULL
+          
+
+          while(j <= 3 && (is.null(fit.bcf) || any(class(fit.bcf) %in% c('error', 'NULL')))) {
+            fit.bcf <- tryCatch({
+              bcf(y, z, x, x, pihat, 4000, 4000)
+            }, error = function(e) e)
+            j <- j + 1
+          }
+          
+          if (!class(fit.bcf)[1] %in% c('simpleError', 'Rcpp::exception')){
+            tau.hat.bcf <- colMeans(fit.bcf$tau)
+            aux_bcf <- c('BCF',
+                         rmse_cate(tau, tau.hat.bcf),
+                         rmse_ate(tau, tau.hat.bcf),
+                         NA,
+                         NA)
+          } else {
+            aux_bcf <- c('BCF',
+                         NA,
+                         NA,
+                         NA,
+                         NA)
+          }
+          
+          SaveResults <- as.data.frame(rbind(aux_bcf))
+          SaveResults$rep <- i
+          SaveResults$n <- n
+          SaveResults$p <- p_val
+          SaveResults$tau_type <- t
+          SaveResults$mu_type <- m
+          SaveResults$k <- k
+          
+          consolidated_results <- rbind(consolidated_results, SaveResults)
+        }
+      }
+    }
+  }
+}
+
+print(consolidated_results)
+
+```
+
+```         
+```
+
+```{r}
+library(dbarts)
+library(bcf)
+library(grf)
+library(bayeslm)
+library(nnet)
+library(BART)
+
+# Define helper functions (defined once, outside generate_data)
+g = function(x){
+  ifelse(x == 1, 2, ifelse(x == 2, -1, -4))
+}
+
+rmse_ate = function(tau, tau_hat){
+  sqrt((mean(tau) - mean(tau_hat))^2)
+}
+
+rmse_cate = function(tau, tau_hat){
+  sqrt(mean((tau - tau_hat)^2))
+}
+
+# Data generating function from the paper (defined only once)
+generate_data = function(n, p, tau, mu, seed){
+  set.seed(seed)
+  
+  # Generate an n x p matrix; then overwrite the first 5 columns
+  x = matrix(rnorm(n * p), nrow = n, ncol = p)
+  x[,1] = rnorm(n)
+  x[,2] = rnorm(n)
+  x[,3] = rnorm(n)
+  x[,4] = rbinom(n, 1, 0.5)
+  x[,5] = sample(c(1,2,3), n, replace = TRUE)
+  u = runif(n, 0, 1)
+  sigma = 5
+  
+  # Treatment effect
+  if (tau == 'homogeneous') {
+    tau_x = 3
+  } else if (tau == 'heterogeneous') {
+    tau_x = 1 + 2 * x[,2] * x[,4]
+  }
+  
+  # Prognostic function
+  if (mu == 'linear') {
+    mu_x = 1 + g(x[,5]) + x[,1] * x[,3]
+  } else if (mu == 'nonlinear') {
+    mu_x = -6 + g(x[,5]) + 6 * abs(x[,3] - 1)
+  }
+  
+  # Propensity score and its estimate
+  pi.x = 0.8 * pnorm((3 * mu_x / sd(mu_x)) - 0.5 * x[,1]) + 0.05 + u / 10
+  z = rbinom(n, 1, pi.x)
+  pihat = apply(bart(x, z, verbose = FALSE)$yhat.train, 2, mean)
+  
+  # Outcome
+  y = mu_x + tau_x * z + rnorm(n, sd = sigma)
+  
+  return(list(y = y,
+              x = x,
+              z = z,
+              tau = tau_x,
+              mu = mu_x,
+              pihat = pihat,
+              n = n,
+              p = p))
+}
+```
+
+```{r}
+#setwd("H:/My Drive/Brown/Class/DATA2020/Final_Project/DATA_2020_Final_Project/r_code")
+#getwd()
+#save_file =getwd()
+#filename = 'Test_BCF_Simulation_results'
+```
+
+```{r}
+
+consolidated_results = NULL
+num_rep = 2 # Monte Carlo repetitions
+sample = c(250) # sample
+ncov = c(5, 50, 100, 500) # number of covariates
+tau_str = c('heterogeneous', 'homogeneous')
+mu_str = c('linear', 'nonlinear')
+
+for (s in 1:length(sample)){
+for (k in 1:length(ncov)){
+for (m in 1:length(mu_str)){
+for (t in 1:length(tau_str)){
+for (i in 1:num_rep){
+          
+data = generate_data(n = sample[s], p = ncov[k], tau = tau_str[t], mu = mu_str[m], seed = i + k)
+
+p = data$p
+n = data$n
+y = data$y
+x = data$x
+z = data$z
+pihat = data$pihat
+tau = data$tau
+
+x.mod = data.frame(x,z,pihat)
+x.train = makeModelMatrixFromDataFrame(data.frame(rbind(x,x),z = c(rep(1,n),rep(0,n)), pihat = c(pihat, pihat)))
+
+# Test data -----------------
+
+data.test = generate_data(n = sample[s], p = ncov[k], tau = tau_str[t], mu = mu_str[m], seed = 1000 + i + k)
+t.y = data.test$y
+t.x = data.test$x
+t.z = data.test$z
+t.pihat = data.test$pihat
+t.tau = data.test$tau
+
+t.x.mod = data.frame(t.x,t.z,t.pihat)
+x.test = makeModelMatrixFromDataFrame(data.frame(rbind(t.x,t.x), z = c(rep(1,n),rep(0,n)), pihat = c(t.pihat, t.pihat)))
+
+# BCF -----------------------------------------------------------------------------------------
+j = 0
+fit.bcf = NULL
+class(fit.bcf) = NULL
+
+while(j <= 3 & any(class(fit.bcf) %in% c('error', 'NULL'))) {
+  fit.bcf = tryCatch({
+    bcf(y, z, x, x, pihat, 4000, 4000)
+  },error = function(e) e)
+
+  j = j+1
+}
+
+if (!class(fit.bcf)[1] %in% c('simpleError', 'Rcpp::exception')){
+
+  tau.hat.bcf = colMeans(fit.bcf$tau)
+  aux_bcf = c('BCF',
+              rmse_cate(tau, tau.hat.bcf),
+              rmse_ate(tau, tau.hat.bcf),
+              NA,
+              NA)
+
+} else {
+  aux_bcf = c('BCF',
+              NA,
+              NA,
+              NA,
+              NA)
+}
+# Save results
+
+SaveResults = as.data.frame(
+  rbind(aux_bcf)
+)
+
+SaveResults$rep = i
+SaveResults$n = n
+SaveResults$p = p
+SaveResults$tau_str = tau_str[t]
+SaveResults$mu_str = mu_str[m]
+
+consolidated_results = rbind(consolidated_results, SaveResults)
+# rownames(consolidated_results) = NULL
+# names(consolidated_results) = c('Algorithm', 'RMSE_CATE_train', 'RMSE_ATE_train', 'RMSE_CATE_test', 'RMSE_ATE_test', 'rep', 'n','tau_str', 'mu_str')
+#save(consolidated_results, file=paste(save_file, filename,'.RData', sep=''))
+
+}
+}
+}
+}
+}
+print(consolidated_results)
+
+```
+
+```{r}
+load("Simulation_files_git/BART_CF_Simulation_results.RData")
+```

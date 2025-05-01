@@ -1,0 +1,10 @@
+     n mu_type   tau_type      ATE_RMSE ATE_Coverage ATE_Length CATE_RMSE
+  <dbl> <chr>     <chr>            <dbl>        <dbl>      <dbl>     <dbl>
+1   250 linear    heterogeneous    0.311         0.96      1.66      1.41
+2   250 linear    homogeneous      0.344         0.96      1.89      0.530
+3   250 nonlinear heterogeneous    0.526         0.72      1.52      1.51
+4   250 nonlinear homogeneous      0.357         0.94      1.45      0.795
+5   500 linear    heterogeneous    0.288         0.96      1.38      1.35
+6   500 linear    homogeneous      0.295         0.96      1.50      0.450
+7   500 nonlinear heterogeneous    0.395         0.76      1.12      1.26
+8   500 nonlinear homogeneous      0.246         0.88      0.978     0.643

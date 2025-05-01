@@ -1,0 +1,268 @@
+---
+title: "Final_Models"
+output: html_document
+date: "2025-04-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## BART Model 
+
+```{r}
+library(dbarts)
+library(dplyr)
+
+# Data Generator Function
+generate_data <- function(n, p, tau_type = "heterogeneous", mu_type = "nonlinear", seed = 123) {
+  set.seed(seed)
+  X <- matrix(rnorm(n * p), nrow = n)
+  colnames(X) <- paste0("X", 1:p)
+
+  mu <- if (mu_type == "linear") {
+    X[,1] + X[,2] + X[,3]
+  } else {
+    2 * abs(X[,1]) + sin(X[,2]) + ifelse(X[,3] > 0, 2, -2)
+  }
+
+  tau <- if (tau_type == "homogeneous") {
+    rep(3, n)
+  } else {
+    1 + X[,1] + 0.5 * X[,2]^2
+  }
+
+  pi_raw <- pnorm(mu + rnorm(n, 0, 0.25))
+  pi <- pmin(1, pmax(0, pi_raw))
+  Z <- rbinom(n, 1, pi)
+  Y <- mu + tau * Z + rnorm(n)
+
+  return(list(x = X, z = Z, y = Y, pihat = pi, tau = tau, mu = mu, n = n, p = p))
+}
+
+# Simulation Settings
+nburn <- 1000
+nsim <- 1000
+num_rep <- 50
+sample_sizes <- c(250, 500)
+mu_types <- c("linear", "nonlinear")
+tau_types <- c("homogeneous", "heterogeneous")
+p <- 5
+
+bart_results <- list()
+
+for (n in sample_sizes) {
+  for (mu_type in mu_types) {
+    for (tau_type in tau_types) {
+      for (rep in 1:num_rep) {
+        cat(sprintf("[BART] Rep %d | n = %d | mu = %s | tau = %s\n", rep, n, mu_type, tau_type))
+        tryCatch({
+          data <- generate_data(n = n, p = p, mu_type = mu_type, tau_type = tau_type, seed = rep)
+          X <- data$x
+          Z <- data$z
+          Y <- data$y
+          tau_true <- data$tau
+          ate_true <- mean(tau_true)
+
+          x.train <- cbind(Z, X)
+          bart_fit <- bart(x.train = x.train,
+                           y.train = Y,
+                           keeptrees = TRUE,
+                           nskip = nburn,
+                           ndpost = nsim,
+                           ntree = 200,
+                           verbose = FALSE)
+
+          newdata_control <- cbind(Z = 0, X)
+          newdata_treated <- cbind(Z = 1, X)
+
+          pred_control <- predict(bart_fit, newdata = newdata_control)
+          pred_treat <- predict(bart_fit, newdata = newdata_treated)
+
+          tau_samples <- pred_treat - pred_control  # [nsim x n]
+          tau_hat <- colMeans(tau_samples)
+          ate_hat <- mean(tau_hat)
+
+          # --- Point Metrics ---
+          rmse_ate <- sqrt((ate_hat - ate_true)^2)
+          rmse_cate <- sqrt(mean((tau_hat - tau_true)^2))
+
+          # --- CATE Credible Intervals ---
+          lower_cate <- apply(tau_samples, 2, quantile, probs = 0.025)
+          upper_cate <- apply(tau_samples, 2, quantile, probs = 0.975)
+          coverage_cate <- mean(tau_true >= lower_cate & tau_true <= upper_cate)
+          length_cate <- mean(upper_cate - lower_cate)
+
+          # --- ATE Credible Interval ---
+          ate_samples <- rowMeans(tau_samples)  # mean across columns = one ATE sample per posterior draw
+          ci_ate <- quantile(ate_samples, probs = c(0.025, 0.975))
+          coverage_ate <- as.numeric(ate_true >= ci_ate[1] & ate_true <= ci_ate[2])
+          length_ate <- ci_ate[2] - ci_ate[1]
+
+          # --- Save Results ---
+          bart_results[[length(bart_results) + 1]] <- data.frame(
+            model = "BART",
+            rep = rep, n = n, mu_type = mu_type, tau_type = tau_type,
+            RMSE_ATE = rmse_ate, RMSE_CATE = rmse_cate,
+            Coverage_ATE = coverage_ate, Coverage_CATE = coverage_cate,
+            Length_ATE = length_ate, Length_CATE = length_cate
+          )
+        }, error = function(e) {
+          cat("⚠️ BART error in rep", rep, "\n")
+        })
+      }
+    }
+  }
+}
+
+# Combine and save
+bart_df <- do.call(rbind, bart_results)
+save(bart_df, file = "bart_sim_results.RData")
+
+# Summarize
+summary_bart <- bart_df %>%
+  group_by(n, mu_type, tau_type) %>%
+  summarise(
+    ATE_RMSE = mean(RMSE_ATE),
+    ATE_Coverage = mean(Coverage_ATE),
+    ATE_Length = mean(Length_ATE),
+    CATE_RMSE = mean(RMSE_CATE),
+    CATE_Coverage = mean(Coverage_CATE),
+    CATE_Length = mean(Length_CATE),
+    .groups = "drop"
+  )
+
+print(summary_bart)
+
+```
+
+
+## BCF Model 
+
+```{r}
+library(bcf)
+library(dplyr)
+
+# Data Generator Function
+generate_data <- function(n, p, tau_type = "heterogeneous", mu_type = "nonlinear", seed = 123) {
+  set.seed(seed)
+  X <- matrix(rnorm(n * p), nrow = n)
+  colnames(X) <- paste0("X", 1:p)
+
+  mu <- if (mu_type == "linear") {
+    X[,1] + X[,2] + X[,3]
+  } else {
+    2 * abs(X[,1]) + sin(X[,2]) + ifelse(X[,3] > 0, 2, -2)
+  }
+
+  tau <- if (tau_type == "homogeneous") {
+    rep(3, n)
+  } else {
+    1 + X[,1] + 0.5 * X[,2]^2
+  }
+
+  pi_raw <- pnorm(mu + rnorm(n, 0, 0.25))
+  pi <- pmin(1, pmax(0, pi_raw))
+  Z <- rbinom(n, 1, pi)
+  Y <- mu + tau * Z + rnorm(n)
+
+  return(list(x = X, z = Z, y = Y, pihat = pi, tau = tau, mu = mu, n = n, p = p))
+}
+
+# Simulation Settings
+nburn <- 1000
+nsim <- 1000
+num_rep <- 50
+sample_sizes <- c(250, 500)
+mu_types <- c("linear", "nonlinear")
+tau_types <- c("homogeneous", "heterogeneous")
+p <- 5
+
+bcf_results <- list()
+
+for (n in sample_sizes) {
+  for (mu_type in mu_types) {
+    for (tau_type in tau_types) {
+      for (rep in 1:num_rep) {
+        cat(sprintf("[BCF] Rep %d | n = %d | mu = %s | tau = %s\n", rep, n, mu_type, tau_type))
+        tryCatch({
+          # -------------------- TRAIN DATA --------------------
+          data_train <- generate_data(n = n, p = p, mu_type = mu_type, tau_type = tau_type, seed = rep)
+          X_train <- data_train$x
+          Z_train <- data_train$z
+          Y_train <- data_train$y
+          pi_train <- data_train$pihat
+
+          # -------------------- TEST DATA --------------------
+          data_test <- generate_data(n = n, p = p, mu_type = mu_type, tau_type = tau_type, seed = 1000 + rep)
+          tau_true <- data_test$tau
+          ate_true <- mean(tau_true)
+
+          # -------------------- FIT BCF --------------------
+          fit <- bcf(
+            y = Y_train,
+            z = Z_train,
+            x_control = X_train,
+            x_moderate = X_train,
+            pihat = pi_train,
+            nburn = nburn,
+            nsim = nsim
+          )
+
+          tau_samples <- fit$tau  # nsim x n
+          tau_hat <- colMeans(tau_samples)
+          ate_hat <- mean(tau_hat)
+
+          # -------------------- POINT ESTIMATES --------------------
+          rmse_ate <- sqrt((ate_hat - ate_true)^2)
+          rmse_cate <- sqrt(mean((tau_hat - tau_true)^2))
+
+          # -------------------- CATE INTERVALS --------------------
+          lower_cate <- apply(tau_samples, 2, quantile, probs = 0.025)
+          upper_cate <- apply(tau_samples, 2, quantile, probs = 0.975)
+          coverage_cate <- mean(tau_true >= lower_cate & tau_true <= upper_cate)
+          length_cate <- mean(upper_cate - lower_cate)
+
+          # -------------------- ATE INTERVAL --------------------
+          ate_samples <- rowMeans(tau_samples)
+          ci_ate <- quantile(ate_samples, probs = c(0.025, 0.975))
+          coverage_ate <- as.numeric(ate_true >= ci_ate[1] & ate_true <= ci_ate[2])
+          length_ate <- ci_ate[2] - ci_ate[1]
+
+          # -------------------- SAVE --------------------
+          bcf_results[[length(bcf_results) + 1]] <- data.frame(
+            model = "BCF",
+            rep = rep, n = n, mu_type = mu_type, tau_type = tau_type,
+            RMSE_ATE = rmse_ate, RMSE_CATE = rmse_cate,
+            Coverage_ATE = coverage_ate, Coverage_CATE = coverage_cate,
+            Length_ATE = length_ate, Length_CATE = length_cate
+          )
+        }, error = function(e) {
+          cat("⚠️ BCF error in rep", rep, "\n")
+        })
+      }
+    }
+  }
+}
+
+# Combine and save
+bcf_df <- do.call(rbind, bcf_results)
+save(bcf_df, file = "bcf_sim_results.RData")
+
+# Summarize
+summary_bcf <- bcf_df %>%
+  group_by(n, mu_type, tau_type) %>%
+  summarise(
+    ATE_RMSE = mean(RMSE_ATE),
+    ATE_Coverage = mean(Coverage_ATE),
+    ATE_Length = mean(Length_ATE),
+    CATE_RMSE = mean(RMSE_CATE),
+    CATE_Coverage = mean(Coverage_CATE),
+    CATE_Length = mean(Length_CATE),
+    .groups = "drop"
+  )
+
+print(summary_bcf)
+
+
+```
